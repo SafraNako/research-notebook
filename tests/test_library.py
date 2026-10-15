@@ -252,3 +252,24 @@ def test_alternate_titles_are_kept_when_substance_differs_and_not_for_formatting
     lib.ingest(rec("Brachytherapy Source Dose Rates by Simulation", ids={"doi": "10.1/a"}, source="arxiv", sid="3"))                # the same, differently capitalised
     assert lib.get(a)["alt_titles"] == ["Brachytherapy source dose rates by simulation"]
     assert [r["ref"] for r in lib.search("simulation")] == [a]
+
+
+def test_failed_operations_never_leave_the_database_locked(tmp_path):
+    """An error path must roll back: otherwise an implicit write transaction stays open and every other connection to the file gets "database is locked"
+    (found by CI on Python 3.13, where the abandoned connection was not collected in time)."""
+    import sqlite3
+    path = str(tmp_path / "lock.db")
+    lib = libmod.Library(path)
+    a = lib.ingest(rec(ids={"doi": "10.1234/a"})).paper_id
+    lib.add_watch("w", "dose", ["arxiv"])
+    failing = [lambda: lib.add_watch("w", "other", ["arxiv"]), lambda: lib.add_watch("", "x", ["arxiv"]), lambda: lib.remove_watch(99), lambda: lib.set_status(a, "nope"),
+               lambda: lib.set_status(99, "okundu"), lambda: lib.set_status(a, "okundu", rating=9), lambda: lib.add_note("", pid=a), lambda: lib.add_note("x", pid=99),
+               lambda: lib.delete_note(99), lambda: lib.tag(99, add=["x"]), lambda: lib.merge(a, a), lambda: lib.merge(a, 99)]
+    for fn in failing:
+        with pytest.raises(ValueError):
+            fn()
+        other = sqlite3.connect(path, timeout=0.05)                                  # a second connection must be able to write at once
+        other.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('probe', '1')")
+        other.commit()
+        other.close()
+    assert lib.setting("probe") == "1"

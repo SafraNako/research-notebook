@@ -42,7 +42,7 @@ arastirma bibtex ice-aktar mine.bib          # and BibTeX in
 arastirma disa-aktar --klasor notes/         # one Markdown file per paper, with front matter and your notes
 arastirma ozet                               # the weekly digest
 arastirma dogrulama                          # 12 validation experiments, offline
-pytest                                       # 184 tests, offline
+pytest                                       # 186 tests, offline
 ```
 
 Command-line tokens are ASCII-transliterated Turkish (`izle` = watch, `kutu` = inbox, `al` = accept, `at` = dismiss, `durum` = status, `etiket` = tag, `not` = note,
@@ -99,7 +99,7 @@ the sources stem words, so "dose" also finds "dosing", and some results will be 
 Nothing is checked only against itself. The program ships a **planted-truth world**: a real local HTTP server that speaks the formats of arXiv (Atom), PubMed (esearch JSON,
 efetch XML) and OpenAlex (JSON) and serves a made-up literature of 43 works in 70 records, each written the way its source writes it, including the cases that make duplicate
 resolution hard. It also ships a **cassette**: the real responses of a live session on 2026-10-15 (two medical-physics watches over the three sources, three papers added by
-identifier), replayed with no network. `arastirma dogrulama` runs 12 experiments and `pytest` 184 tests, all offline.
+identifier), replayed with no network. `arastirma dogrulama` runs 12 experiments and `pytest` 186 tests, all offline.
 
 | what | checked against | result |
 |---|---|---|
@@ -124,6 +124,10 @@ identifier), replayed with no network. `arastirma dogrulama` runs 12 experiments
 * **An oversized response was retried with back-off** for about 14 seconds although retrying can never help (found because a test was slow); permanent failures are not retried.
 * **The LaTeX decoder** dropped `\TeX`, kept `$^{192}$` raw, and could eat a literal backslash recovered from `\textbackslash{}`; BibTeX export re-ordered a corporate author
   (`{The ATLAS Collaboration}` became "Collaboration, The ATLAS"). Authors are now written as stored.
+* **Error paths left the database locked.** A duplicate watch, or deleting a watch that does not exist, left an implicit SQLite write transaction open; the next command (a new
+  connection) then failed with "database is locked". It passed on Python 3.9 and 3.12, where the abandoned connection happened to be garbage-collected in time, and failed on 3.13: found
+  by CI, not by me. Every mutating operation now rolls back on failure, misses are detected before anything is written, the command line closes the library when a command ends,
+  and a test proves a second connection can always write after any failed operation (it fails on the old code with exactly the CI error).
 * arXiv returned HTTP 429 to the very first live probes, which is why throttling is a first-class case (per-source windows, retry with back-off, a status that says so).
 * My own tests were wrong several times (a title I thought was short had seven words; a regex test that assumed no real abstract contains `<`; a world whose truth missed a hostname).
   The program was right each time.

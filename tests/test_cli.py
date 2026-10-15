@@ -152,3 +152,14 @@ def test_the_database_is_one_file_that_persists_between_invocations(env, capsys)
     assert os.path.exists(db)
     lib = libmod.Library(db)
     assert len(lib.papers()) == 1 and lib.notes(1)[0]["body"] == "kalici not"
+
+
+def test_every_command_closes_the_library_so_a_second_invocation_can_always_write(env):
+    db, net, tmp = env
+    import sqlite3
+    for args in (["izle", "ekle", "a", "dose"], ["izle", "ekle", "a", "baska"], ["izle", "sil", "9"], ["durum", "9", "okundu"], ["not", "9", "x"], ["birlestir", "8", "9"], ["izle", "sil", "1"]):
+        run(db, *args)
+        other = sqlite3.connect(db, timeout=0.05)
+        other.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('probe', '1')")
+        other.commit()
+        other.close()

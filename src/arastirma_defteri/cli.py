@@ -31,7 +31,9 @@ def _now(args):
 
 
 def _open(args):
-    return Library(args.db, clock=lambda: _now(args))
+    lib = Library(args.db, clock=lambda: _now(args))
+    args._libs.append(lib)                                  # closed when the command ends, so the file is never left locked
+    return lib
 
 
 def _client(args):
@@ -502,8 +504,12 @@ def build_parser():
 def main(argv=None, endpoints=None, client=None, now=None):
     """Run the command line. ``endpoints``, ``client`` and ``now`` replace the public services, the HTTP client and the clock (tests, private mirrors)."""
     args = build_parser().parse_args(argv)
-    args._endpoints, args._client, args._now = endpoints, client, now
-    return args.func(args)
+    args._endpoints, args._client, args._now, args._libs = endpoints, client, now, []
+    try:
+        return args.func(args)
+    finally:
+        for lib in args._libs:
+            lib.close()
 
 
 if __name__ == "__main__":

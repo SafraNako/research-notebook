@@ -2,6 +2,7 @@
 and a full-text index over titles, abstracts, authors, tags and notes."""
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sqlite3
@@ -35,6 +36,18 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, watch_id INTEGER NOT NULL REFERENCES watches(id), started_at TEXT NOT NULL, summary TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(kind UNINDEXED, ref UNINDEXED, title, abstract, authors, tags, notes, tokenize='unicode61 remove_diacritics 2');
 """
+
+
+def _atomic(method):
+    """Roll back whatever a failing method had begun: an implicit SQLite write transaction left open by an error path would lock every other connection to the file."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except BaseException:
+            self.db.rollback()
+            raise
+    return wrapper
 
 
 def _index_form(text):
@@ -119,6 +132,7 @@ class Library:
         return {r["status"]: r["n"] for r in self.db.execute("SELECT status, COUNT(*) AS n FROM papers GROUP BY status")}
 
     # --- ingesting records ----------------------------------------------------------------------------------------------------------------
+    @_atomic
     def ingest(self, paper, watch_id=None, status="yeni"):
         """Add a record, or fold it into the paper it belongs to. A record that bridges two existing papers (shares an identifier with each) merges them."""
         cand = dedup.id_sets(paper.ids)
@@ -217,6 +231,7 @@ class Library:
         self.db.execute("DELETE FROM papers WHERE id = ?", (drop,))
         self.db.commit()
 
+    @_atomic
     def merge(self, keep, drop):
         """Merge two papers by hand (the user knows they are one)."""
         if keep == drop or self.get(keep) is None or self.get(drop) is None:
@@ -225,6 +240,7 @@ class Library:
         self.reindex(keep)
 
     # --- states, tags, notes --------------------------------------------------------------------------------------------------------------
+    @_atomic
     def set_status(self, pid, status, rating=None):
         if status not in STATUSES:
             raise ValueError(f"unknown status {status!r}: choose from {', '.join(STATUSES)}")
@@ -234,6 +250,7 @@ class Library:
         self.db.execute("UPDATE papers SET status = ?, rating = COALESCE(?, rating), updated_at = ? WHERE id = ?", (status, rating, self.now(), pid))
         self.db.commit()
 
+    @_atomic
     def tag(self, pid, add=(), remove=()):
         self._require(pid)
         for t in add:
@@ -249,6 +266,7 @@ class Library:
     def norm_tag(tag):
         return re.sub(r"\s+", "-", tag.strip().lower().lstrip("#"))
 
+    @_atomic
     def add_note(self, body, pid=None, title=""):
         if not body.strip():
             raise ValueError("an empty note is not stored")
@@ -266,6 +284,7 @@ class Library:
             rows = self.db.execute("SELECT * FROM notes WHERE paper_id = ? ORDER BY id", (pid,))
         return [dict(r) for r in rows]
 
+    @_atomic
     def delete_note(self, note_id):
         row = self.db.execute("SELECT paper_id FROM notes WHERE id = ?", (note_id,)).fetchone()
         if row is None:
@@ -320,6 +339,7 @@ class Library:
         return [{"kind": r["kind"], "ref": r["ref"], "title": r["title"], "snippet": r["snip"]} for r in rows]
 
     # --- watches --------------------------------------------------------------------------------------------------------------------------
+    @_atomic
     def add_watch(self, name, query, sources, category=None, days=30, max_results=50):
         if not name.strip() or not (query.strip() or category):
             raise ValueError("a watch needs a name and a query or a category")
@@ -339,13 +359,16 @@ class Library:
             out.append(d)
         return out
 
+    @_atomic
     def remove_watch(self, watch_id):
-        if self.db.execute("DELETE FROM watches WHERE id = ?", (watch_id,)).rowcount == 0:
+        if self.db.execute("SELECT 1 FROM watches WHERE id = ?", (watch_id,)).fetchone() is None:     # look before writing: no transaction is opened for a miss
             raise ValueError(f"no watch {watch_id}")
+        self.db.execute("DELETE FROM watches WHERE id = ?", (watch_id,))
         self.db.execute("DELETE FROM runs WHERE watch_id = ?", (watch_id,))
         self.db.execute("DELETE FROM watch_state WHERE watch_id = ?", (watch_id,))
         self.db.commit()
 
+    @_atomic
     def record_run(self, watch_id, summary, when):
         self.db.execute("INSERT INTO runs (watch_id, started_at, summary) VALUES (?, ?, ?)", (watch_id, when, json.dumps(summary, ensure_ascii=False)))
         self.db.execute("UPDATE watches SET last_run = ? WHERE id = ?", (when, watch_id))
@@ -355,6 +378,7 @@ class Library:
         r = self.db.execute("SELECT last_ok FROM watch_state WHERE watch_id = ? AND source = ?", (watch_id, source)).fetchone()
         return r["last_ok"] if r else None
 
+    @_atomic
     def mark_ok(self, watch_id, source, when):
         self.db.execute("INSERT OR REPLACE INTO watch_state (watch_id, source, last_ok) VALUES (?, ?, ?)", (watch_id, source, when))
         self.db.commit()
@@ -363,6 +387,7 @@ class Library:
         r = self.db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return r["value"] if r else default
 
+    @_atomic
     def set_setting(self, key, value):
         self.db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
         self.db.commit()
